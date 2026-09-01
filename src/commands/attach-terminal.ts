@@ -1,4 +1,5 @@
 import type { Command } from "commander";
+import { StringDecoder } from "node:string_decoder";
 import { readLatestSupersetManifest } from "../superset/manifest";
 
 interface AttachOptions {
@@ -20,6 +21,11 @@ function attachTerminal(options: AttachOptions): void {
   const ws = new WebSocket(toTerminalWsUrl(manifest.endpoint, options.terminal, options.workspace, manifest.authToken));
   ws.binaryType = "arraybuffer";
   const forwardInput = makeInputForwarder(ws);
+  // Multi-byte UTF-8 characters in the remote output can straddle a WebSocket message
+  // boundary. A stateful decoder carries any incomplete trailing bytes over to the next
+  // message instead of re-decoding each chunk in isolation, which would otherwise emit
+  // U+FFFD replacement characters into unrelated text.
+  const outputDecoder = new StringDecoder("utf8");
 
   const sendResize = () => {
     if (ws.readyState !== WebSocket.OPEN) return;
@@ -42,13 +48,13 @@ function attachTerminal(options: AttachOptions): void {
 
   ws.addEventListener("message", (event) => {
     if (event.data instanceof ArrayBuffer) {
-      process.stdout.write(stripMouseTrackingSequences(Buffer.from(event.data).toString("utf8")));
+      process.stdout.write(stripMouseTrackingSequences(outputDecoder.write(Buffer.from(event.data))));
       return;
     }
 
     if (event.data instanceof Blob) {
       event.data.arrayBuffer().then((buffer) =>
-        process.stdout.write(stripMouseTrackingSequences(Buffer.from(buffer).toString("utf8"))),
+        process.stdout.write(stripMouseTrackingSequences(outputDecoder.write(Buffer.from(buffer)))),
       );
       return;
     }
@@ -144,9 +150,10 @@ const DISABLE_MOUSE_TRACKING = [...MOUSE_TRACKING_MODES].map((mode) => `\x1b[?${
 // mode is ever combined with an unrelated private mode (e.g. cursor visibility).
 //
 // This operates on the decoded string per WebSocket message rather than a byte-level stream
-// parser. For this bridge, each message is a self-contained terminal-output chunk, so a
-// DECSET/DECRST escape sequence won't be split across two messages in practice — a full
-// streaming parser would be overkill for the problem this is fixing.
+// parser (the caller's StringDecoder already handles multi-byte UTF-8 characters split across
+// messages). A DECSET/DECRST escape sequence itself being split across two messages is not
+// handled — the sequence would pass through unfiltered rather than corrupting output, and a
+// full streaming escape-sequence parser would be overkill for the problem this is fixing.
 function stripMouseTrackingSequences(input: string): string {
   return input.replace(/\x1b\[\?([\d;]+)([hl])/g, (full, codes: string, suffix: string) => {
     const codeList = codes.split(";");
