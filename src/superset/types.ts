@@ -20,6 +20,13 @@ export interface SupersetTerminalDescriptor {
   label?: string;
 }
 
+export interface SupersetTerminalSession {
+  terminalId: string;
+  exited: boolean;
+  attached?: boolean;
+  label?: string;
+}
+
 export interface CreateWorkspaceResult {
   workspace: SupersetWorkspace;
   terminals: SupersetTerminalDescriptor[];

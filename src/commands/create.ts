@@ -17,7 +17,7 @@ import type { SupersetHostManifest } from "../superset/manifest";
 import { identifyWorkspace } from "../superset/identify";
 import { resolveProject } from "../superset/projects";
 import { trpcMutation, trpcQuery } from "../superset/trpc";
-import type { CreateWorkspaceResult, SupersetProject } from "../superset/types";
+import type { CreateWorkspaceResult, SupersetProject, SupersetTerminalDescriptor, SupersetTerminalSession } from "../superset/types";
 import { resolveWorktreePath } from "../superset/paths";
 
 interface CreateOptions {
@@ -108,7 +108,9 @@ async function createWorkspace(
   let targetTabId = herdrWorkspace.tab.tab_id;
   let targetPaneId = herdrWorkspace.root_pane.pane_id;
 
-  const terminals = options.setupTerminals === false ? [] : created.terminals;
+  const terminals = options.setupTerminals === false
+    ? []
+    : await fetchLiveTerminals(manifest, created.workspace.id);
   for (const [index, terminal] of terminals.entries()) {
     const label = terminal.label ?? `Superset ${index + 1}`;
     if (index === 0) {
@@ -136,6 +138,25 @@ async function createWorkspace(
   if (options.eject) {
     ejectCurrentPane(logger);
   }
+}
+
+async function fetchLiveTerminals(
+  manifest: SupersetHostManifest,
+  workspaceId: string,
+): Promise<SupersetTerminalDescriptor[]> {
+  const response = await trpcQuery<unknown>(manifest, "terminal.list", { workspaceId });
+  const sessions = normalizeTerminalSessions(response);
+  return sessions
+    .filter((session) => !session.exited)
+    .map((session) => ({ terminalId: session.terminalId, label: session.label }));
+}
+
+function normalizeTerminalSessions(response: unknown): SupersetTerminalSession[] {
+  if (Array.isArray(response)) return response as SupersetTerminalSession[];
+  if (response && typeof response === "object" && Array.isArray((response as { sessions?: unknown }).sessions)) {
+    return (response as { sessions: SupersetTerminalSession[] }).sessions;
+  }
+  return [];
 }
 
 async function resolveCreateProject(
