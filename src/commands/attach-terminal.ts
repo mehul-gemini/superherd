@@ -89,7 +89,7 @@ function attachTerminal(options: AttachOptions): void {
     if (process.stdin.isTTY) process.stdin.setRawMode(false);
     if (paneId && identifiedAgent) {
       try {
-        releaseHerdrAgent(paneId);
+        releaseHerdrAgent(paneId, "superherd", identifiedAgent);
       } catch {
         // best-effort: don't block exit on agent-tracking cleanup failures
       }
