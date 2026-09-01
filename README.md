@@ -39,7 +39,7 @@ This will:
 
 1. create or reuse a Superset workspace for `my-branch`
 2. derive the Superset worktree path
-3. create a Herdr workspace at that path
+3. open a Herdr workspace at that path via `herdr worktree open`, so it's grouped in Herdr's sidebar under the repo's other worktrees
 4. open Superset setup terminals as Herdr tabs
 5. create and focus a final local Herdr shell tab
 
@@ -86,6 +86,8 @@ hs attach-terminal --workspace <superset-workspace-id> --terminal <terminal-id>
 ```
 
 The bridge forwards Ctrl-C to the Superset PTY. Typing `exit` at the start of a line closes the local bridge instead of sending `exit` to the remote terminal.
+
+The bridge also sniffs early output to identify which coding agent (Claude, Codex, Gemini) is running in the terminal, and reports that identity plus a `working` state to Herdr via `herdr pane report-agent`, so Herdr's status icons and Agents view reflect the bridged session. The agent is released via `herdr pane release-agent` when the bridge closes.
 
 ## Notes
 
