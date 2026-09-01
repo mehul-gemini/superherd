@@ -24,7 +24,7 @@ export interface SupersetTerminalSession {
   terminalId: string;
   exited: boolean;
   attached?: boolean;
-  label?: string;
+  title?: string;
 }
 
 export interface CreateWorkspaceResult {
