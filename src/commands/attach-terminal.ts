@@ -1,5 +1,6 @@
 import type { Command } from "commander";
 import { StringDecoder } from "node:string_decoder";
+import { releaseHerdrAgent, reportHerdrAgent } from "../herdr/cli";
 import { readLatestSupersetManifest } from "../superset/manifest";
 
 interface AttachOptions {
@@ -27,6 +28,21 @@ function attachTerminal(options: AttachOptions): void {
   // U+FFFD replacement characters into unrelated text.
   const outputDecoder = new StringDecoder("utf8");
 
+  const paneId = process.env.HERDR_PANE_ID;
+  let identifiedAgent: string | null = null;
+
+  const sniffAgent = (text: string) => {
+    if (!paneId || identifiedAgent) return;
+    const agent = detectAgent(text);
+    if (!agent) return;
+    identifiedAgent = agent;
+    try {
+      reportHerdrAgent(paneId, "superherd", agent, "working");
+    } catch {
+      // best-effort: agent-tracking is not critical to the terminal bridge
+    }
+  };
+
   const sendResize = () => {
     if (ws.readyState !== WebSocket.OPEN) return;
     ws.send(JSON.stringify({
@@ -48,14 +64,18 @@ function attachTerminal(options: AttachOptions): void {
 
   ws.addEventListener("message", (event) => {
     if (event.data instanceof ArrayBuffer) {
-      process.stdout.write(stripMouseTrackingSequences(outputDecoder.write(Buffer.from(event.data))));
+      const text = outputDecoder.write(Buffer.from(event.data));
+      sniffAgent(text);
+      process.stdout.write(stripMouseTrackingSequences(text));
       return;
     }
 
     if (event.data instanceof Blob) {
-      event.data.arrayBuffer().then((buffer) =>
-        process.stdout.write(stripMouseTrackingSequences(outputDecoder.write(Buffer.from(buffer)))),
-      );
+      event.data.arrayBuffer().then((buffer) => {
+        const text = outputDecoder.write(Buffer.from(buffer));
+        sniffAgent(text);
+        process.stdout.write(stripMouseTrackingSequences(text));
+      });
       return;
     }
 
@@ -67,6 +87,13 @@ function attachTerminal(options: AttachOptions): void {
 
   ws.addEventListener("close", (event) => {
     if (process.stdin.isTTY) process.stdin.setRawMode(false);
+    if (paneId && identifiedAgent) {
+      try {
+        releaseHerdrAgent(paneId, "superherd", identifiedAgent);
+      } catch {
+        // best-effort: don't block exit on agent-tracking cleanup failures
+      }
+    }
     process.exit(event.code === 1000 ? 0 : 1);
   });
 
@@ -127,6 +154,14 @@ function makeInputForwarder(ws: WebSocket): (chunk: Buffer) => void {
       lineStart = char === "\r" || char === "\n";
     }
   };
+}
+
+function detectAgent(text: string): string | null {
+  const lower = text.toLowerCase();
+  if (lower.includes("gemini")) return "gemini";
+  if (lower.includes("codex") || lower.includes("gpt-5")) return "codex";
+  if (lower.includes("claude") || lower.includes("sonnet") || lower.includes("opus")) return "claude";
+  return null;
 }
 
 function safeJsonParse(value: string): Record<string, unknown> | null {
