@@ -1,4 +1,5 @@
 import type { Command } from "commander";
+import { StringDecoder } from "node:string_decoder";
 import { readLatestSupersetManifest } from "../superset/manifest";
 
 interface AttachOptions {
@@ -20,6 +21,11 @@ function attachTerminal(options: AttachOptions): void {
   const ws = new WebSocket(toTerminalWsUrl(manifest.endpoint, options.terminal, options.workspace, manifest.authToken));
   ws.binaryType = "arraybuffer";
   const forwardInput = makeInputForwarder(ws);
+  // Multi-byte UTF-8 characters in the remote output can straddle a WebSocket message
+  // boundary. A stateful decoder carries any incomplete trailing bytes over to the next
+  // message instead of re-decoding each chunk in isolation, which would otherwise emit
+  // U+FFFD replacement characters into unrelated text.
+  const outputDecoder = new StringDecoder("utf8");
 
   const sendResize = () => {
     if (ws.readyState !== WebSocket.OPEN) return;
@@ -31,6 +37,10 @@ function attachTerminal(options: AttachOptions): void {
   };
 
   ws.addEventListener("open", () => {
+    // Defensive baseline: if a prior session crashed while the remote side had mouse
+    // reporting turned on, the local terminal may still be stuck in that mode. Reset it
+    // before we start forwarding anything.
+    process.stdout.write(DISABLE_MOUSE_TRACKING);
     if (process.stdin.isTTY) process.stdin.setRawMode(true);
     process.stdin.resume();
     sendResize();
@@ -38,12 +48,14 @@ function attachTerminal(options: AttachOptions): void {
 
   ws.addEventListener("message", (event) => {
     if (event.data instanceof ArrayBuffer) {
-      process.stdout.write(Buffer.from(event.data));
+      process.stdout.write(stripMouseTrackingSequences(outputDecoder.write(Buffer.from(event.data))));
       return;
     }
 
     if (event.data instanceof Blob) {
-      event.data.arrayBuffer().then((buffer) => process.stdout.write(Buffer.from(buffer)));
+      event.data.arrayBuffer().then((buffer) =>
+        process.stdout.write(stripMouseTrackingSequences(outputDecoder.write(Buffer.from(buffer)))),
+      );
       return;
     }
 
@@ -123,4 +135,31 @@ function safeJsonParse(value: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+// xterm mouse-tracking DECSET/DECRST mode numbers (x10, VT200, button-event, any-event,
+// UTF-8, SGR, URXVT extended coordinates).
+const MOUSE_TRACKING_MODES = new Set(["1000", "1001", "1002", "1003", "1004", "1005", "1006", "1015", "1016"]);
+
+const DISABLE_MOUSE_TRACKING = [...MOUSE_TRACKING_MODES].map((mode) => `\x1b[?${mode}l`).join("");
+
+// Strips CSI ?<modes>h / CSI ?<modes>l sequences that enable/disable mouse-tracking reporting
+// so the local terminal is never told to enter mouse-reporting mode by the remote session.
+// Mode numbers can be semicolon-separated in a single sequence (e.g. "?1000;1006h"), so each
+// sequence is filtered code-by-code rather than matched/dropped as a whole, in case a mouse
+// mode is ever combined with an unrelated private mode (e.g. cursor visibility).
+//
+// This operates on the decoded string per WebSocket message rather than a byte-level stream
+// parser (the caller's StringDecoder already handles multi-byte UTF-8 characters split across
+// messages). A DECSET/DECRST escape sequence itself being split across two messages is not
+// handled — the sequence would pass through unfiltered rather than corrupting output, and a
+// full streaming escape-sequence parser would be overkill for the problem this is fixing.
+function stripMouseTrackingSequences(input: string): string {
+  return input.replace(/\x1b\[\?([\d;]+)([hl])/g, (full, codes: string, suffix: string) => {
+    const codeList = codes.split(";");
+    const remaining = codeList.filter((code) => !MOUSE_TRACKING_MODES.has(code));
+    if (remaining.length === codeList.length) return full;
+    if (remaining.length === 0) return "";
+    return `\x1b[?${remaining.join(";")}${suffix}`;
+  });
 }
