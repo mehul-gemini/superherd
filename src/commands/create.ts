@@ -17,7 +17,14 @@ import type { SupersetHostManifest } from "../superset/manifest";
 import { identifyWorkspace } from "../superset/identify";
 import { resolveProject } from "../superset/projects";
 import { trpcMutation, trpcQuery } from "../superset/trpc";
-import type { CreateWorkspaceResult, SupersetProject, SupersetTerminalDescriptor, SupersetTerminalSession } from "../superset/types";
+import type {
+  CreateWorkspaceResult,
+  SupersetLocalWorkspace,
+  SupersetProject,
+  SupersetTerminalDescriptor,
+  SupersetTerminalSession,
+  SupersetWorkspace,
+} from "../superset/types";
 import { resolveWorktreePath } from "../superset/paths";
 
 interface CreateOptions {
@@ -94,7 +101,9 @@ async function createWorkspace(
     name,
     ...(options.from ? { baseBranch: options.from } : {}),
   });
-  const worktreePath = resolveWorktreePath(project, created.workspace);
+  const worktreePath = created.workspace.worktreePath
+    ? created.workspace.worktreePath
+    : await resolveCreatedWorktreePath(manifest, project, created.workspace);
 
   if (!existsSync(worktreePath)) {
     throw new CliError(`Superset worktree path does not exist: ${worktreePath}`);
@@ -170,6 +179,30 @@ function normalizeTerminalSessions(response: unknown): SupersetTerminalSession[]
     return (response as { sessions: SupersetTerminalSession[] }).sessions;
   }
   return [];
+}
+
+/**
+ * The `workspaces.create` response doesn't reliably populate `worktreePath` (see
+ * superherd#2), and guessing it from the branch name is wrong for the main-repo
+ * worktree or any workspace Superset assigned a custom folder name to (superherd#3).
+ * `workspace.get` is the authoritative source, so fetch it there; only fall back to
+ * the branch-name guess if that lookup fails.
+ */
+async function resolveCreatedWorktreePath(
+  manifest: SupersetHostManifest,
+  project: SupersetProject,
+  workspace: SupersetWorkspace,
+): Promise<string> {
+  try {
+    const local = await trpcQuery<SupersetLocalWorkspace>(manifest, "workspace.get", {
+      id: workspace.id,
+    });
+    if (local.worktreePath) return local.worktreePath;
+  } catch {
+    // fall through to the guessed path below
+  }
+
+  return resolveWorktreePath(project, workspace);
 }
 
 async function resolveCreateProject(
