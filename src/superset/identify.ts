@@ -4,7 +4,6 @@ import type { SupersetHostManifest } from "./manifest";
 import { resolveWorktreePath } from "./paths";
 import { trpcQuery } from "./trpc";
 import type {
-  SupersetCloudWorkspaceSummary,
   SupersetLocalWorkspace,
   SupersetProject,
   SupersetWorkspace,
@@ -26,7 +25,7 @@ export async function identifyWorkspace(
 ): Promise<IdentifiedWorkspace | null> {
   const [projects, cloudWorkspaces] = await Promise.all([
     trpcQuery<SupersetProject[]>(manifest, "project.list"),
-    trpcQuery<SupersetCloudWorkspaceSummary[]>(manifest, "workspace.cloudList"),
+    trpcQuery<SupersetLocalWorkspace[]>(manifest, "workspace.list", {}),
   ]);
 
   const projectById = new Map(projects.map((project) => [project.id, project]));
