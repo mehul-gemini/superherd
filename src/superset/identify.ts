@@ -25,7 +25,7 @@ export async function identifyWorkspace(
 ): Promise<IdentifiedWorkspace | null> {
   const [projects, cloudWorkspaces] = await Promise.all([
     trpcQuery<SupersetProject[]>(manifest, "project.list"),
-    trpcQuery<SupersetLocalWorkspace[]>(manifest, "workspace.list"),
+    trpcQuery<SupersetLocalWorkspace[]>(manifest, "workspace.list", {}),
   ]);
 
   const projectById = new Map(projects.map((project) => [project.id, project]));
