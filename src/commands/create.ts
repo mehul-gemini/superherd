@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { basename } from "node:path";
 import type { Command } from "commander";
-import { CliError } from "../errors";
+import { CliError, errorMessage } from "../errors";
 import { assertBranchNotCheckedOut, assertLocalBranchExists, getGitRoot } from "../git";
 import {
   closeHerdrPane,
@@ -17,7 +17,7 @@ import type { SupersetHostManifest } from "../superset/manifest";
 import { identifyWorkspace } from "../superset/identify";
 import { resolveProject } from "../superset/projects";
 import { trpcMutation, trpcQuery } from "../superset/trpc";
-import type { CreateWorkspaceResult, SupersetProject } from "../superset/types";
+import type { CreateWorkspaceResult, SupersetProject, SupersetTerminalDescriptor, SupersetTerminalSession } from "../superset/types";
 import { resolveWorktreePath } from "../superset/paths";
 
 interface CreateOptions {
@@ -108,7 +108,9 @@ async function createWorkspace(
   let targetTabId = herdrWorkspace.tab.tab_id;
   let targetPaneId = herdrWorkspace.root_pane.pane_id;
 
-  const terminals = options.setupTerminals === false ? [] : created.terminals;
+  const terminals = options.setupTerminals === false
+    ? []
+    : await fetchLiveTerminals(manifest, created.workspace.id, logger);
   for (const [index, terminal] of terminals.entries()) {
     const label = terminal.label ?? `Superset ${index + 1}`;
     if (index === 0) {
@@ -136,6 +138,38 @@ async function createWorkspace(
   if (options.eject) {
     ejectCurrentPane(logger);
   }
+}
+
+async function fetchLiveTerminals(
+  manifest: SupersetHostManifest,
+  workspaceId: string,
+  logger: ReturnType<typeof createLogger>,
+): Promise<SupersetTerminalDescriptor[]> {
+  // The workspace already exists in both Superset and Herdr by the time this
+  // runs (see createWorkspace above), so a terminal.list failure here must
+  // not abort the command — that would leave a half-configured Herdr
+  // workspace with no shell tab and no focus. Degrade to "no live terminals"
+  // instead.
+  let response: unknown;
+  try {
+    response = await trpcQuery<unknown>(manifest, "terminal.list", { workspaceId });
+  } catch (error) {
+    logger.info(`could not fetch live terminals, continuing without mirroring them: ${errorMessage(error)}`);
+    return [];
+  }
+
+  const sessions = normalizeTerminalSessions(response);
+  return sessions
+    .filter((session) => !session.exited)
+    .map((session) => ({ terminalId: session.terminalId, label: session.title }));
+}
+
+function normalizeTerminalSessions(response: unknown): SupersetTerminalSession[] {
+  if (Array.isArray(response)) return response as SupersetTerminalSession[];
+  if (response && typeof response === "object" && Array.isArray((response as { sessions?: unknown }).sessions)) {
+    return (response as { sessions: SupersetTerminalSession[] }).sessions;
+  }
+  return [];
 }
 
 async function resolveCreateProject(
