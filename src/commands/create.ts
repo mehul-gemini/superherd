@@ -103,7 +103,7 @@ async function createWorkspace(
   logger.info(`${created.alreadyExists ? "reused" : "created"} Superset workspace ${created.workspace.id}`);
   logger.info(`opening Herdr workspace at ${worktreePath}`);
 
-  const herdrWorkspace = createHerdrWorkspace(worktreePath, name);
+  const herdrWorkspace = createHerdrWorkspace(repoRoot, worktreePath, name);
   const herdrWorkspaceId = herdrWorkspace.workspace.workspace_id;
   let targetTabId = herdrWorkspace.tab.tab_id;
   let targetPaneId = herdrWorkspace.root_pane.pane_id;

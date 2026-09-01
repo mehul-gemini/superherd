@@ -13,10 +13,21 @@ export interface HerdrTabCreated {
 }
 
 export function createHerdrWorkspace(
-  cwd: string,
+  repoRoot: string,
+  worktreePath: string,
   label: string,
 ): HerdrWorkspaceCreated {
-  const response = runHerdrJson(["workspace", "create", "--cwd", cwd, "--label", label, "--focus"]);
+  const response = runHerdrJson([
+    "worktree",
+    "open",
+    "--cwd",
+    repoRoot,
+    "--path",
+    worktreePath,
+    "--label",
+    label,
+    "--focus",
+  ]);
   return response.result as HerdrWorkspaceCreated;
 }
 
