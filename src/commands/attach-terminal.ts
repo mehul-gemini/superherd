@@ -22,6 +22,7 @@ function attachTerminal(options: AttachOptions): void {
   const ws = new WebSocket(toTerminalWsUrl(manifest.endpoint, options.terminal, options.workspace, manifest.authToken));
   ws.binaryType = "arraybuffer";
   const forwardInput = makeInputForwarder(ws);
+  const mouseFilter = makeMouseSequenceFilter();
   // Multi-byte UTF-8 characters in the remote output can straddle a WebSocket message
   // boundary. A stateful decoder carries any incomplete trailing bytes over to the next
   // message instead of re-decoding each chunk in isolation, which would otherwise emit
@@ -30,10 +31,15 @@ function attachTerminal(options: AttachOptions): void {
 
   const paneId = process.env.HERDR_PANE_ID;
   let identifiedAgent: string | null = null;
+  // Carries a short tail of prior output so an agent banner split across WebSocket
+  // messages (e.g. "Co" / "dex") is still recognized once the rest arrives.
+  let agentSniffBuffer = "";
+  const AGENT_SNIFF_TAIL = 32;
 
   const sniffAgent = (text: string) => {
     if (!paneId || identifiedAgent) return;
-    const agent = detectAgent(text);
+    agentSniffBuffer = (agentSniffBuffer + text).slice(-AGENT_SNIFF_TAIL * 2);
+    const agent = detectAgent(agentSniffBuffer);
     if (!agent) return;
     identifiedAgent = agent;
     try {
@@ -66,7 +72,7 @@ function attachTerminal(options: AttachOptions): void {
     if (event.data instanceof ArrayBuffer) {
       const text = outputDecoder.write(Buffer.from(event.data));
       sniffAgent(text);
-      process.stdout.write(stripMouseTrackingSequences(text));
+      process.stdout.write(mouseFilter.filter(text));
       return;
     }
 
@@ -74,7 +80,7 @@ function attachTerminal(options: AttachOptions): void {
       event.data.arrayBuffer().then((buffer) => {
         const text = outputDecoder.write(Buffer.from(buffer));
         sniffAgent(text);
-        process.stdout.write(stripMouseTrackingSequences(text));
+        process.stdout.write(mouseFilter.filter(text));
       });
       return;
     }
@@ -86,6 +92,8 @@ function attachTerminal(options: AttachOptions): void {
   });
 
   ws.addEventListener("close", (event) => {
+    const leftover = mouseFilter.flush();
+    if (leftover) process.stdout.write(leftover);
     if (process.stdin.isTTY) process.stdin.setRawMode(false);
     if (paneId && identifiedAgent) {
       try {
@@ -172,9 +180,10 @@ function safeJsonParse(value: string): Record<string, unknown> | null {
   }
 }
 
-// xterm mouse-tracking DECSET/DECRST mode numbers (x10, VT200, button-event, any-event,
-// UTF-8, SGR, URXVT extended coordinates).
-const MOUSE_TRACKING_MODES = new Set(["1000", "1001", "1002", "1003", "1004", "1005", "1006", "1015", "1016"]);
+// xterm mouse-tracking DECSET/DECRST mode numbers (x10, VT200/highlight, button-event,
+// any-event, UTF-8, SGR, URXVT and SGR-pixels extended coordinates). Deliberately excludes
+// 1004 (focus in/out reporting), which is not a mouse-tracking mode.
+const MOUSE_TRACKING_MODES = new Set(["1000", "1001", "1002", "1003", "1005", "1006", "1015", "1016"]);
 
 const DISABLE_MOUSE_TRACKING = [...MOUSE_TRACKING_MODES].map((mode) => `\x1b[?${mode}l`).join("");
 
@@ -184,11 +193,9 @@ const DISABLE_MOUSE_TRACKING = [...MOUSE_TRACKING_MODES].map((mode) => `\x1b[?${
 // sequence is filtered code-by-code rather than matched/dropped as a whole, in case a mouse
 // mode is ever combined with an unrelated private mode (e.g. cursor visibility).
 //
-// This operates on the decoded string per WebSocket message rather than a byte-level stream
-// parser (the caller's StringDecoder already handles multi-byte UTF-8 characters split across
-// messages). A DECSET/DECRST escape sequence itself being split across two messages is not
-// handled — the sequence would pass through unfiltered rather than corrupting output, and a
-// full streaming escape-sequence parser would be overkill for the problem this is fixing.
+// This only handles a sequence that arrives whole within a single decoded chunk. A sequence
+// split across two WebSocket messages is buffered by makeMouseSequenceFilter below, which
+// calls this function once the full sequence has been reassembled.
 function stripMouseTrackingSequences(input: string): string {
   return input.replace(/\x1b\[\?([\d;]+)([hl])/g, (full, codes: string, suffix: string) => {
     const codeList = codes.split(";");
@@ -197,4 +204,32 @@ function stripMouseTrackingSequences(input: string): string {
     if (remaining.length === 0) return "";
     return `\x1b[?${remaining.join(";")}${suffix}`;
   });
+}
+
+// Trailing prefix of a DECSET/DECRST private-mode sequence that hasn't seen its terminating
+// h/l yet, e.g. "\x1b", "\x1b[", "\x1b[?", "\x1b[?1000". Anchored to the end of the string so
+// only a genuinely incomplete sequence at the tail is held back.
+const INCOMPLETE_MOUSE_SEQUENCE = /\x1b(\[(\?[\d;]*)?)?$/;
+
+// Wraps stripMouseTrackingSequences with a one-chunk buffer so a DECSET/DECRST sequence split
+// across two WebSocket messages is still recognized: any incomplete trailing sequence is held
+// back and prepended to the next chunk before filtering, instead of being written unfiltered.
+function makeMouseSequenceFilter(): { filter: (chunk: string) => string; flush: () => string } {
+  let pending = "";
+
+  const filter = (chunk: string): string => {
+    const combined = pending + chunk;
+    const held = combined.match(INCOMPLETE_MOUSE_SEQUENCE)?.[0] ?? "";
+    const safe = held ? combined.slice(0, combined.length - held.length) : combined;
+    pending = held;
+    return stripMouseTrackingSequences(safe);
+  };
+
+  const flush = (): string => {
+    const remaining = pending;
+    pending = "";
+    return remaining;
+  };
+
+  return { filter, flush };
 }
